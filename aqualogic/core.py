@@ -95,6 +95,7 @@ class AquaLogic():
     FRAME_TYPE_REMOTE_WIRED_KEY_EVENT = b'\x00\x03'
     # Wireless remote
     FRAME_TYPE_WIRELESS_KEY_EVENT = b'\x00\x83'
+    FRAME_TYPE_WIRELESS2_KEY_EVENT = b'\x00\x8c'
     FRAME_TYPE_ON_OFF_EVENT = b'\x00\x05'   # Seems to only work for some keys
 
     FRAME_TYPE_KEEP_ALIVE = b'\x01\x01'
@@ -118,6 +119,8 @@ class AquaLogic():
         self._pump_speed = None
         self._pump_power = None
         self._states = 0
+        self._displayLine1 = None
+        self._displayLine2 = None
         self._flashing_states = 0
         self._send_queue = queue.Queue()
         self._multi_speed_pump = False
@@ -171,7 +174,7 @@ class AquaLogic():
             except KeyError:
                 pass
 
-    def process(self, data_changed_callback):
+    def process(self, data_changed_callback, display_changed_callback):
         """Process data; returns when the reader signals EOF.
         Callback is notified when any data changes."""
         # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -241,8 +244,14 @@ class AquaLogic():
                 _LOGGER.warning('Bad CRC')
                 continue
 
+            #_LOGGER.info('%3.3f: Frame: %s',
+            #    frame_start_time,
+            #    binascii.hexlify(frame))
+
             frame_type = frame[0:2]
             frame = frame[2:]
+
+
 
             if frame_type == self.FRAME_TYPE_KEEP_ALIVE:
                 # Keep alive
@@ -259,12 +268,12 @@ class AquaLogic():
             elif frame_type == self.FRAME_TYPE_REMOTE_WIRED_KEY_EVENT:
                 _LOGGER.debug('%3.3f: Remote Wired Key: %s',
                               frame_start_time, binascii.hexlify(frame))
-            elif frame_type == self.FRAME_TYPE_WIRELESS_KEY_EVENT:
+            elif frame_type == self.FRAME_TYPE_WIRELESS_KEY_EVENT or frame_type == self.FRAME_TYPE_WIRELESS2_KEY_EVENT:
                 _LOGGER.debug('%3.3f: Wireless Key: %s',
                               frame_start_time, binascii.hexlify(frame))
             elif frame_type == self.FRAME_TYPE_LEDS:
-                # _LOGGER.debug('%3.3f: LEDs: %s',
-                #              frame_start_time, binascii.hexlify(frame))
+                _LOGGER.debug('%3.3f: LEDs: %s',
+                              frame_start_time, binascii.hexlify(frame))
                 # First 4 bytes are the LEDs that are on;
                 # second 4 bytes_ are the LEDs that are flashing
                 states = int.from_bytes(frame[0:4], byteorder='little')
@@ -301,9 +310,26 @@ class AquaLogic():
                     self._pump_power = power
                     data_changed_callback(self)
             elif frame_type == self.FRAME_TYPE_DISPLAY_UPDATE:
-                parts = frame.decode('latin-1').split()
+                # remove string termination
+                frame = frame[:-1]
+
+                # Remove blinking bit
+                frame = bytearray(x & 0b01111111 for x in frame)
+
+                text = frame.decode('latin-1').replace("_",chr(0xB0))
+                parts = text.split()
+                lineLen = int(len(text)/2)
+                displayLine1 = text[:lineLen]
+                displayLine2 = text[lineLen+1:]
+
                 _LOGGER.debug('%3.3f: Display update: %s',
                               frame_start_time, parts)
+
+                if self._displayLine1 != displayLine1 or self._displayLine2 != displayLine2:
+                    self._displayLine1 = displayLine1
+                    self._displayLine2 = displayLine2
+                    if display_changed_callback != None:
+                        display_changed_callback(self)
 
                 try:
                     if parts[0] == 'Pool' and parts[1] == 'Temp':
@@ -354,6 +380,8 @@ class AquaLogic():
                             data_changed_callback(self)
                     elif parts[0] == 'Heater1':
                         self._heater_auto_mode = parts[1] == 'Auto'
+                    elif parts[0] == 'Gas' and parts[1] == 'Heater':
+                        self._heater_auto_mode = parts[2] == 'Auto'
                 except ValueError:
                     pass
             elif frame_type == self.FRAME_TYPE_LONG_DISPLAY_UPDATE:
@@ -463,6 +491,18 @@ class AquaLogic():
         """Returns the current pump power in watts, or None if unknown.
            Requires a Hayward VSP pump connected to the AquaLogic bus."""
         return self._pump_power
+
+    @property
+    def display_line_1(self):
+        """Returns the current pump speed in percent, or None if unknown.
+           Requires a Hayward VSP pump connected to the AquaLogic bus."""
+        return self._displayLine1
+    
+    @property
+    def display_line_2(self):
+        """Returns the current pump speed in percent, or None if unknown.
+           Requires a Hayward VSP pump connected to the AquaLogic bus."""
+        return self._displayLine2
 
     @property
     def is_metric(self):
